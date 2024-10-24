@@ -256,27 +256,39 @@ So far, we have discussed how pods communicate within the same host using bridge
 #### DNS:
 - K8s use **CoreDNS** for dns resolution. Previously, `KubeDNS` was used for the same
 - The **default domain name** used for DNS resolution **within the cluster** is `cluster.local`
-- DNS naming conventions:
-	- For services: `<service-name>.<namespace>.svc.cluster.local`.
-	- For pods: `<pod-ip-address-replace-dot-with-hyphen>.<namespace>.pod.cluster.local`.
-- When Pods and Services are in the same namespace, you can **use just the service name** instead of the FQDN , e.g., `http://<serice_name>
-- For Pods and Services in different namespaces we can use `<service-name>.<namespace>` and optionally append `.svc` or `.svc.cluster.local`.
-- Extra info: The configuration file used to store DNS settings is called the **Corefile**.
-- https://blog.sophaskins.net/blog/misadventures-with-kube-dns/
-
-
+- **DNS Naming Conventions**:
+	- **Services**: The FQDN format for services is `<service-name>.<namespace>.svc.cluster.local`. For example, a service named `web` in the `dev` namespace would have the FQDN `web.dev.svc.cluster.local`.
+	- **Pods**: The naming convention for pods is `<pod-ip-address-replace-dot-with-hyphen>.<namespace>.pod.cluster.local`. For instance, a pod with IP `10.0.0.5` in the `dev` namespace would be named `10-0-0-5.dev.pod.cluster.local`.
+- **DNS Resolution**:
+	- When **Pods and Services are in the same namespace**, you can refer to the service using just its name (e.g., `http://<service_name>`). For example, `http://web` would be sufficient if both the pod and service are in the same namespace.
+	- When Pods and Services are in **different namespaces**, you need to use the `<service-name>.<namespace>` format (e.g., `web.dev`). You can optionally append `.svc` or `.svc.cluster.local` if needed.
+- The configuration file used for CoreDNS is called the **Corefile**. It defines the DNS behavior and can include customizations like forwarding, caching, or specific DNS record manipulations. This makes CoreDNS very versatile compared to KubeDNS.
 ### Service in k8s:
 #### Kube-Proxy: The Core of Kubernetes Networking: 
 **Kube-proxy** runs on every node in a Kubernetes cluster. It watches for changes in **Services** and **Endpoints** objects in real-time and dynamically adjusts network rules accordingly here is how it works:
 - When a user creates a **Service** in the cluster, an **Endpoints** object with the same name is automatically created to store the IP addresses of Pods that match the Service’s label selector.
 - Kube-proxy monitors these changes and sets up the necessary network rules (using iptables or IPVS) on each node. These rules allow clients to connect to Services through a stable IP, known as the **ClusterIP**.
 - Once kube-proxy has set the required rules, client Pods or external users can access the Service by routing traffic through these rules. Kube-proxy then forwards the request to the relevant Pods that belong to the Service, based on load-balancing algorithms.
-
+-  Kube-proxy LoadBalancer module can be implemented in these ways: userspace, IPVS, iptables, nftables and kernelspace
+	- **Userspace**: 
+		- This is a legacy implementation of kube-proxy mainly targeted to Oprating system with a lower kernel version as both  IPVS, iptables requires higher version of kernel/table
+	-  **iptables**:
+		- In iptables mode, kube-proxy appends rules to the "NAT pre-routing" hook to implement its NAT and load balancing capabilities.
+		- By default, kube-proxy chooses a backend randomly in iptables mode.
+		- the way kube-proxy programs iptables rules is an O(n) algorithm where n is the number of services and the number of backend Pods behind each service
+	- **IPVS**:
+		- IPVS is built on top of the Netfilter and implements transport-layer load balancing as part of the Linux kernel
+		- IPVS allows advanced scheduling algorithms and health checking mechanisms for pods, making it more performant than iptables-based kube-proxy implementations.
+	- **nftables**:
+		- A newer alternative to iptables, **nftables** offers better efficiency and flexibility. Although not as widely supported in kube-proxy implementations yet, it is seen as the future replacement for iptables, as it allows for more advanced rule sets and simplified management.
+	- **Kernelspace**:
+		- a mode where the kube-proxy configures packet forwarding rules in the Windows kernel
+		- This is the only mode available for windows.
 >[!note]
->When a Service is created, kube-proxy creates a **NAT link** in iptables to facilitate routing. If two different deployments share the same Service label, kube-proxy will balance traffic across both deployments' Pods.
+>When a Service is created, kube-proxy creates a **NAT link** in iptables to facilitate routing. 
+>If two different deployments share the same Service label, kube-proxy will balance traffic across both deployments' Pods.
+
 ---
-- Whenever we create a service kube-proxy crete a nat link in iptables.
-- If two pods have the same label but are part of different deployments, the same service will load-balance traffic to both deployments.
 - **Types of Services**:
 	- **ClusterIP**: 
 	    - Default type.
@@ -287,7 +299,7 @@ So far, we have discussed how pods communicate within the same host using bridge
 	    - Exposes a port on each node in the cluster.
 	    - When a packet hits the node on the specified port, it is forwarded to the corresponding ClusterIP service, which then load-balances to the backend pods.
 	    - When a NodePort service is created, Kubernetes also creates a ClusterIP service for that NodePort.
-	    - 3 reasons to not use Nodeport:
+	    - reasons to not use Nodeport:
 		    -  **Port Exposure on All Nodes**: By exposing a NodePort, the service becomes accessible on the same port across all nodes in the cluster. This increases the attack surface by opening external access on every node, which can be a security risk.
 		    - **Traffic Routing and Latency**: In a scenario where traffic is directed to a node that doesn’t have the desired Pod running, Kubernetes will reroute the traffic to the appropriate node hosting the Pod. This rerouting process introduces _an extra hop_, adding network latency to each request.
 		    - **Limited Port Range**: NodePort services are restricted to a predefined range of ports (default: 30000–32767). This range limitation can become a constraint when you have multiple services requiring external exposure.
@@ -295,6 +307,7 @@ So far, we have discussed how pods communicate within the same host using bridge
 	  - **LoadBalancer**:
 	    - Exposes the service to the external world using a cloud provider's load balancer.
 	    - Useful for accessing applications from outside the cluster.
+	    - Automatically creates NodePort and ClusterIP services
 	- **Ingress**: 
 		- Ingress is a Kubernetes resource that provides external access to services within a cluster
 		- Types of Routing:
@@ -303,9 +316,14 @@ So far, we have discussed how pods communicate within the same host using bridge
 			- Path-Based Routing
 			- Wildcard Routing
 	- **ExternalName**:
-		- we can point to other cname
+		- We can point to other cname
 		- Services with type `ExternalName` work as other regular services, but when the service name is accessed, instead of returning cluster-ip of this service, it returns CNAME record with value to the external service.
-- **Services Without Selectors**:  It’s possible to create a Service without specifying a Pod selector, which can be useful in scenarios where you want to manually define the backend. This involves creating a separate **Endpoints** object that lists the IPs of the backend servers:
+- **Services Without Selectors**:  It’s possible to create a Service without specifying a Pod selector.
+	- Useful for :
+		- Pointing to services in different namespaces
+		- Integrating with external services
+		- Manual endpoint management
+	- This involves creating a separate **Endpoints** object that lists the IPs of the backend servers, Example:
 	```yaml
 	apiVersion: v1
 	kind: Service
@@ -339,6 +357,130 @@ So far, we have discussed how pods communicate within the same host using bridge
     - Useful for stateful applications or when backend pods need to communicate with one another.
 	- The Dns Instead of returning a single DNS A record, the DNS server will return multiple A records for the service, each pointing to the IP of an individual pod backing the service at that moment.
 	- There’s no built-in load-balancing or proxying with a headless Service. Each Pod’s IP address is exposed directly, giving more flexibility and control over traffic distribution.
+### Best Practices
+1. **Service Discovery**:
+   - Use DNS names instead of hard-coded IPs
+   - Leverage namespace isolation for service organization
+   
+2. **Security**:
+   - Minimize NodePort usage in production
+   - Use LoadBalancer or Ingress for external access
+   - Implement network policies for fine-grained control
+
+3. **Performance**:
+   - Consider using headless services for stateful workloads
+   - Monitor kube-proxy performance metrics
+   - Use appropriate service type based on use case
+### Graph for services:
+```mermaid
+graph TB
+
+%% External Access Layer
+
+subgraph "External Access"
+
+CLI["External Client"]
+
+CLB["Cloud Load Balancer"]
+
+ING["Ingress Controller"]
+
+end
+
+  
+
+%% Service Layer
+
+subgraph "Service Types"
+
+SVC_LB["LoadBalancer Service"]
+
+SVC_NP["NodePort Service"]
+
+SVC_CIP["ClusterIP Service"]
+
+SVC_HL["Headless Service"]
+
+SVC_EXT["ExternalName Service"]
+
+end
+
+  
+
+%% Core Components
+
+subgraph "Core Components"
+
+KPROXY["kube-proxy"]
+
+COREDNS["CoreDNS"]
+
+EP["Endpoints"]
+
+end
+
+  
+
+%% Workload Layer
+
+subgraph "Workloads"
+
+POD1["Pod 1"]
+
+POD2["Pod 2"]
+
+POD3["Pod 3"]
+
+end
+
+  
+
+%% External Service
+
+EXT_SVC["External Service/Database"]
+
+  
+
+%% Connections
+
+CLI -->|"HTTP/HTTPS"| CLB
+
+CLI -->|"HTTP/HTTPS"| ING
+
+CLB --> SVC_LB
+
+ING -->|"Route rules"| SVC_CIP
+
+  
+
+SVC_LB -->|"Creates"| SVC_NP
+
+SVC_NP -->|"Creates"| SVC_CIP
+
+SVC_CIP --> EP
+
+SVC_HL -->|"DNS lookup"| COREDNS
+
+SVC_EXT -->|"CNAME"| EXT_SVC
+
+  
+
+KPROXY -->|"Watches"| EP
+
+KPROXY -->|"Creates iptables rules"| POD1
+
+KPROXY -->|"Creates iptables rules"| POD2
+
+KPROXY -->|"Creates iptables rules"| POD3
+
+  
+
+EP -->|"Points to"| POD1
+
+EP -->|"Points to"| POD2
+
+EP -->|"Points to"| POD3
+```
 ---
 #### NetworkPolicy:
 - From k8s doc 
@@ -348,6 +490,10 @@ So far, we have discussed how pods communicate within the same host using bridge
 - `NetworkPolicy` uses:
 	- `podSelector` to **select pods based on their labels**.
 	- `namespaceSelector` to **select pods in specific namespaces**.
+### Example Use Cases:
+
+1. **Restricting Pod Communication**: You can use NetworkPolicies to limit communication between different services or applications within your cluster to increase security. For instance, only allow the frontend pods to communicate with backend pods.
+2. **Isolating External Traffic**: Control and restrict external traffic entering your cluster using specific ingress policies to harden the cluster against external threats.
 ### 
 ###
 ###
