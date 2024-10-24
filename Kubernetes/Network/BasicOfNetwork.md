@@ -1,4 +1,3 @@
-In this Article we will be talking about how networking works in kubernetes by going to very basic to very high level.
 ## **Container Network**:
 When we create a container using Docker (or any other container runtime like CRI-O), it automatically generates a separate Linux network namespace for that container. This means that the container gets its own network stack, including its own IP address, routing tables, and ports, which are isolated from the host machine's network.
 ### Why Separate Network Namespaces?
