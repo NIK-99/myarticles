@@ -1,3 +1,4 @@
+In this Article we will be talking about how networking works in kubernetes by going to very basic to very high level.
 ## **Container Network**:
 When we create a container using Docker (or any other container runtime like CRI-O), it automatically generates a separate Linux network namespace for that container. This means that the container gets its own network stack, including its own IP address, routing tables, and ports, which are isolated from the host machine's network.
 ### Why Separate Network Namespaces?
@@ -138,50 +139,48 @@ So far, we have discussed how pods communicate within the same host using bridge
 	- Basically Overlay Network is a flat network working above host network.
 	- Kubernetes does not provide any default network implementation, rather it only defines the model and leaves to other tools like kube-proxy, Calico, Flannel to implement it
 	- Packet flow from pod A in node1 to podB in node2
-```mermaid
-graph LR
-A[Pod A - Node 1] --> B[veth pair -Node 1]
-B --> C[Bridge cbr0 - Node 1]
-C --> D[Overlay Network]
-D --> E[Bridge cbr0 - Node 2]
-E --> F[veth pair -Node 2]
-F --> G[Pod B - Node 2]
-```
-- Flowchart for the same
-```mermaid
-%% Cross-Node Pod Communication
-flowchart TB
-    subgraph Node1["Node 1"]
-        subgraph P1["Pod 1 (10.244.1.2)"]
-            C1["Container"]
-        end
-        B1["cbr0 Bridge"]
-        F1["flannel0/calico"]
-        P1 --> |veth| B1
-        B1 --> F1
-    end
-    
-    subgraph Node2["Node 2"]
-        subgraph P2["Pod 2 (10.244.2.2)"]
-            C2["Container"]
-        end
-        B2["cbr0 Bridge"]
-        F2["flannel0/calico"]
-        P2 --> |veth| B2
-        B2 --> F2
-    end
-    
-    subgraph Overlay["Overlay Network"]
-        direction LR
-        RT1["Router/Switch"]
-    end
-    
-    F1 --> |"VXLAN/\nIPIP"| RT1
-    F2 --> |"VXLAN/\nIPIP"| RT1
-    
-```
-
-
+	```mermaid
+	graph LR
+	A[Pod A - Node 1] --> B[veth pair -Node 1]
+	B --> C[Bridge cbr0 - Node 1]
+	C --> D[Overlay Network]
+	D --> E[Bridge cbr0 - Node 2]
+	E --> F[veth pair -Node 2]
+	F --> G[Pod B - Node 2]
+	```
+	- Flowchart for the same
+	```mermaid
+	%% Cross-Node Pod Communication
+	flowchart TB
+	    subgraph Node1["Node 1"]
+	        subgraph P1["Pod 1 (10.244.1.2)"]
+	            C1["Container"]
+	        end
+	        B1["cbr0 Bridge"]
+	        F1["flannel0/calico"]
+	        P1 --> |veth| B1
+	        B1 --> F1
+	    end
+	    
+	    subgraph Node2["Node 2"]
+	        subgraph P2["Pod 2 (10.244.2.2)"]
+	            C2["Container"]
+	        end
+	        B2["cbr0 Bridge"]
+	        F2["flannel0/calico"]
+	        P2 --> |veth| B2
+	        B2 --> F2
+	    end
+	    
+	    subgraph Overlay["Overlay Network"]
+	        direction LR
+	        RT1["Router/Switch"]
+	    end
+	    
+	    F1 --> |"VXLAN/\nIPIP"| RT1
+	    F2 --> |"VXLAN/\nIPIP"| RT1
+	    
+	```
 >[!note]
 > All plug-ins must follow a couple of important rules. 
 > First, Pod IP addresses should come from a single pool of IP addresses, although this pool can be subdivided by node. This means that we can treat all Pods as part of a **single flat network**, no matter where the Pods run.
@@ -191,13 +190,16 @@ flowchart TB
 	- Overlay networks in Kubernetes are primarily managed by specific CNI (Container Network Interface) plugins. CNIs are responsible for two crucial tasks:
 		-  **IP Management**: CNIs allocate and manage each Pod's IP address, ensuring that there are no conflicts within the network.
 		-  **Data Synchronization**: CNIs synchronize network information across all nodes to maintain consistent routing and communication between nodes.
+	- Overlay networks are built using tunneling techniques such as **VXLAN (Virtual Extensible LAN)**, **GRE (Generic Routing Encapsulation)**, or other protocols. These tunnels allow data packets to be encapsulated and transported between nodes in the cluster.
 		
-	To understand CNI lets take a look on how flannel and calico works 
-	- Both **Flannel** and **Calico** operate at Layer 3 of the OSI model, focusing on IP-based routing for communication between nodes:
-	- **flannel** : Flannel is created by CoreOS for Kubernetes networking, It support in 3 different models:
+	To understand how CNI works lets take a look on how flannel works 
+	-  **Flannel** operate at Layer 3 of the OSI model, focusing on IP-based routing for communication between nodes:
+	 **Flannel:** 
+	- Flannel is created by CoreOS for Kubernetes networking, It support in 3 different models:
 		#### Mode 1: UDP
 		- When Flannel is set up on a Kubernetes node, it runs a daemon named **flanneld**. This daemon creates the TUN device `flannel0`, which acts as the default gateway for the Docker bridge (`docker0`).
 		- Flannel allocates a unique subnet from the Pod CIDR to each node, ensuring that every Pod on that node receives an IP within this subnet.
+		- Flanneld will query the local cache or etcd based on the private IP address of the receiver. It will get the IP address of the receiver host then route the packet to the required host.
 		- To view the private network segment allocated to Docker, we can check `/etc/docker/daemon.json` on the node. Flannel can also modify Docker's configuration to attach the allocated network segment by using the `--bip` option.
 		- Suppose we have pod0 on node1 and pod1 on node2 then the Packet flow would be:
 			- **Pod0** → `docker0` → `flannel0` (flanneld packs the packet) → (sender network interface) → (intermediate router) → (receiver network interface) → `flannel0` (flanneld unpacks) → `docker0` → **Pod1**
@@ -205,17 +207,51 @@ flowchart TB
 		#### Mode 2: VxLan
 		- VXLAN, or Virtual Extensible LAN is a network virtualization technology supported by Linux. 
 		- VXLAN can completely implement encapsulation and decapsulation in kernel mode, thereby building an overlay network through the "tunnel" mechanism.
-		- In this mode the VxLan will set up VTEP() in layer 2 network.
+		- In this mode, the previous IP allocation remains unchanged (flannel0 is changed to flannel.1), and a VXLAN tunnel needs to be established between the sending host and the receiving host, that is, a VTEP(VTEP works on layer2)
+		- **The process is still very long, but because the packing and unpacking operations are performed by the kernel, the efficiency is higher than UDP.**
 		- To view VXLAN interfaces `ip -d link show type vxlan` and for monitoring we can use tcpdump
+		- Here is the flow diagram for VxLan mode:
+		```mermaid
+		sequenceDiagram
 		
+		participant P1 as Pod 1
+		
+		participant D1 as docker0
+		
+		participant F1 as flannel.1 (VTEP)
+		
+		participant NET as Physical Network
+		
+		participant D2 as Target docker0
+		
+		Note over F1: VXLAN Encapsulation (Kernel Space)
+		
+		P1->>D1: 1. Send packet
+		
+		D1->>F1: 2. Forward to flannel.1
+		
+		Note over F1: 3. Lookup target VTEP<br/>(cache/etcd)
+		
+		F1->>F1: 4. Kernel encapsulates<br/>with VXLAN header
+		
+		F1->>NET: 5. Send via network
+		
+		NET->>D2: 6. Deliver to target
+		
+		Note over P1,D2: All encap/decap in kernel space<br/>More efficient than UDP mode
+		
+		```
 
-
-
-Overlay networks are built using tunneling techniques such as **VXLAN (Virtual Extensible LAN)**, **GRE (Generic Routing Encapsulation)**, or other protocols. These tunnels allow data packets to be encapsulated and transported between nodes in the cluster.
-
-%% > [!info]
- > The above is explained using Docker but this can be extended to other container Runtimes. %%
----
+		#### Mode 3  host-GW:
+		- In this mode all the host act as a gateway
+		- **Host as Gateway**: Each host is responsible for routing traffic to other hosts. It plays the role of a gateway, making it responsible for the flow of traffic between containers located on different nodes.
+		- **Direct IP Conversion**: The host-GW mode directly converts the IP address information from the private network and host IP into routing information, stored in etcd. This routing information helps each host understand how to forward packets.
+		- **Shorter Network Path**: The communication path in host-GW mode is shorter compared to other modes. For example, the path could look like this:
+			`pod1 → docker0 → (sender network card) → (receiver network card) → docker0 → pod2`
+			Here, traffic goes directly from one host’s network card to another, avoiding additional overlay networking layers.
+		- **Drawback**: The process is much shorter, but because the host machine needs to be used as a gateway, the two machines are required to be in the same subnet. Its efficiency is also very high, but when the number of cluster nodes increases, the routing information is difficult to maintain.
+		- This mode is useful when the cluster nodes are relatively close in network topology or reside within the same subnet, offering a simple yet efficient routing mechanism. However, as the cluster grows, the complexity of maintaining route entries across all hosts increases.
+		
 ### Outside clusters :
 #### DNS:
 - K8s use **CoreDNS** for dns resolution. Previously, `KubeDNS` was used for the same
