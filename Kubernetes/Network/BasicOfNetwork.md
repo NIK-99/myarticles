@@ -1,30 +1,35 @@
 ## **Container Network**:
 When we create a container using Docker (or any other container runtime like CRI-O), it automatically generates a separate Linux network namespace for that container. This means that the container gets its own network stack, including its own IP address, routing tables, and ports, which are isolated from the host machine's network.
-The above statement rises a question **Why should we have separate Network Namespaces for each container?**
-To answer this lets look at this scenario:
-#### Connecting Containers to the Host Network:
-If we want to allow a container to utilize the host network we can attach `--net=host` to the docker run like this:
+### Why Separate Network Namespaces?
+To understand the importance of network namespaces, let's first look at what happens when we don't use them.
+#### Host Network Mode:
+When Docker is configured to use the host network for a container (by specifying `--net=host`), it does not create a separate network namespace for that container. 
+Instead, the container shares the host’s network namespace, giving it direct access to the host’s network interfaces and IP addresses. This means the container runs as if it is part of the host’s network stack, without a unique network layer or isolated IP.
 ```bash
 docker run -d --net=host --name nginx-host nginx
 ```
-This command runs the NGINX container and binds it directly to the host's network. Instead of having its own isolated network namespace, the container will use the host’s IP address and network interfaces.****
+the above command runs the NGINX container and binds it directly to the host's network. Instead of having its own isolated network namespace, the container will use the host’s IP address and network interfaces.****
 
 Advantage of using `--net=host` :
 - This will enable the container to directly listens to port 80 (or whatever port needed) of the host. this will eliminate the use of Docker port publishing
 - Directly using the host network stack will provide better network performance for the container.
+- Simplified debugging of network issues.
 
 Disadvantages of Using `--net=host`:
 - Have multiple container on the same node will introduce problems with shared network resources like port conflicts etc.
-- It will not isolate the network of the container from the Host network which makes the container more vulnerable if the host network is attacked or compromised.
-
+- It will not isolate the network of the container from the Host network 
+- Due to no network isolation the containers are more vulnerable if the host network is attacked or compromised.
+- Potential interference with host network services
+### Benefits of Network Namespaces
 In the above scenario, using `--net=host` should be approached cautiously, especially for production environments where isolation and security are critical.
-To avoid these problems, it’s recommended to keep containers in their own **network namespaces**, which include separate IP addresses and port allocations. This brings several benefits:
-- **Network Isolation**: Each container can run independently with its own network stack, avoiding conflicts and maintaining security boundaries. This isolation also ensures that processes in one container cannot directly interfere with or spy on network traffic in another container or the host
+To avoid these problems, it’s recommended to keep containers in their own separate **network namespaces**, which include separate IP addresses and port allocations. This brings several benefits:
+- **Network Isolation**: Each container can run independently with its own network stack, avoiding conflicts and maintaining security boundaries. This isolation also ensures that processes in one container cannot directly interfere with or spy on network traffic in another container or the host.
 - **Flexibility**: Containers with their own network namespaces can be flexibly attached to different networks or virtual networks, such as bridges or overlay networks, which can be used to provide dynamic networking configurations 
 - **Resource Management**: Having containers in separate network namespaces makes it easier to manage network resources. Different CNI plugins in kubernetes (e.g., Calico, Cilium) uses custom network policies to enforce fine-grained networking policies, allowing for better control over container communication.
 - **Host Network Protection**: By isolating the container’s network stack from the host’s, it reduces the risk of accidental or malicious misconfiguration impacting the host’s networking.
-## **Communication between Pods :**
+## **Pod-to-Pod Communication :**
 In this section, we will explore how **Kubernetes pods** communicate with each other, whether they are on the same node, different nodes, or even across clusters. But before we dive into pod communication, it is essential to understand how pods within nodes communicate between each other.
+### Same-Node Communication
 ### Container and Network Namespaces
 - Every Pods, by design, runs within its own **network namespace** which provides an isolated network stack, similar to a host with an independent "network stack" containing a unique IP address, routing tables, and ports. The question is: how do containers in separate network namespaces communicate with each other?
 ### Communicating within same host:
@@ -34,38 +39,148 @@ In this section, we will explore how **Kubernetes pods** communicate with each o
 - **Veth Pairs (Virtual Ethernet Devices)**: pods are connected to the bridge using **veth pairs** (virtual ethernet pairs). 
 	- When a pod is launched or created, Docker or the CNI creates two virtual Ethernet devices (called veth pairs). One side of the veth device is placed inside the container’s network namespace, while the other end connects to the host’s network namespace or a virtual bridge.
 	- Any data packet sent from one side of the veth device is immediately transferred to the other side. This is how containers communicate over the bridge.
-
->[!info]
->Here Veth means virtual ethernet
+	- To view Veth pair
+	```bash
+	# View veth pairs on host
+	ip -c link show type veth
+	
+	```
 - **Virtual Bridge**: When Docker is installed, or a host joins a Kubernetes cluster, a virtual bridge (called `docker0` in Docker) is created on a host, which acts like a **virtual switch**. Every pod is connected to this bridge, and through it, they can communicate with one another.
 	- The pods are assigned unique IP addresses by the bridge for communication.
 	- We can use this command `brctl show` to show the bridges.
 	- Additionally, to check the virtual network interfaces on a node, we can use `ifconfig` or `ip address`.
-- To list all the namespaces created in a node we can use:
+	To view virtual bridge
+	```
+	# View bridge details
+	bridge link show
+	brctl show
+	
+	#Examine bridge interface
+	ip addr show cbr0
+	```
+- useful commands for network debugging
 ```bash
-# For all
-lsns
-# only for network namespace TYPE=net
-lsns -t net
+lsns -t net          # List network namespaces
+brctl show           # Show virtual bridges
+ip addr              # Show network interfaces
 ```
-https://blog.scottlowe.org/2013/09/04/introducing-linux-network-namespaces/
-#### Pod Communication in Kubernetes:
-While Docker uses `docker0`, Kubernetes abstracts container communication using its own networking model. **Kubelet**, the Kubernetes node agent, creates a network namespace for each pod and attaches the pod to the network through the **Container Network Interface (CNI)** plugins.
+- **Example packet flow**:
+	-  Pod A (10.244.1.2) → Pod B (10.244.1.3) on same node suppose we ping from pod A to pod B:
+		1. Packet leaves Pod A's network namespace via veth
+		2. Enters host network namespace
+		3. Processed by bridge (cbr0/docker0)
+		4. Forwarded to Pod B's veth
+		5. Enters Pod B's network namespace
+- FlowChart for internal connection:
+```mermaid
+%% Enhanced Container Network Namespace Structure
+
+flowchart TB
+subgraph Host["Host Machine"]
+subgraph NS1["Container 1 Network NS"]
+NIC1["eth0 IP: 172.17.0.2"]
+RT1["Routing Table, Firewall Rules"]
+end
+
+subgraph NS2["Container 2 Network NS"]
+NIC2["eth0 IP: 172.17.0.3"]
+RT2["Routing Table, Firewall Rules"]
+end
+
+BRIDGE["docker0 Bridge IP: 172.17.0.1"]
+HNIC["Host Network Interface eth0"]
+
+NIC1 --> |veth pair| BRIDGE
+NIC2 --> |veth pair| BRIDGE
+BRIDGE --> HNIC
+end
+%% Nodes Font Style
+classDef titleClass font-size:14px,font-weight:bold
+class Host,NS1,NS2,BRIDGE,HNIC titleClass
+```
+### Communicating within same host in Kubernetes:
+While Docker uses `docker0`, Kubernetes abstracts container communication using its own networking model. 
+**Kubelet**, the Kubernetes node agent, creates a network namespace for each pod and attaches the pod to the network through the **Container Network Interface (CNI)** plugins.
 - Each Pod in a Kubernetes cluster has its own independent IP address whereas in docker.
 -  Multiple Pods on same host can directly communicate with each other using localhost or Pod IP addresses because their Network Namespace is connect to same bridge.
 - `cbr0`(L2 network device) is own kubernetes bridge which is created to differentiate from `docker0` bridge used by docker.
+```mermaid
+flowchart TB
+    subgraph Node["Kubernetes Node"]
+        subgraph Pod1["Pod 1"]
+            C1["Container 1"]
+            C2["Container 2"]
+            C1 --- |"localhost"| C2
+        end
+        
+        subgraph Pod2["Pod 2"]
+            C3["Container 3"]
+            C4["Container 4"]
+            C3 --- |"localhost"| C4
+        end
+        
+        BRIDGE["cbr0 Bridge"]
+        
+        Pod1 --> |"veth1 \n 10.244.1.2"| BRIDGE
+        Pod2 --> |"veth2 \n 10.244.1.3"| BRIDGE
+    end
+```
 
 >Tl;DR
->Each pod runs in its own **network namespace** . On the host, A virtual bridge (e.g., `docker0`) is established, that allowing communication between containers attached to this bridge. **Veth pairs**  link each container to the bridge, facilitating packet transmission between containers via this virtual switch.
-![[Pasted image 20241023153426.png|600]]
-### Communicating across different  host:
+>Each pod runs in its own **network namespace** . On the host, A virtual bridge (e.g., `docker0`, `cbr0`) is established, that allowing communication between containers attached to this bridge. **Veth pairs**  link each container to the bridge, facilitating packet transmission between containers via this virtual switch.
+### Cross-Host Communication:
 So far, we have discussed how pods communicate within the same host using bridges like `docker0`. However, in a Kubernetes cluster, pods are distributed across multiple nodes, and they still need to communicate seamlessly. Let's understand how Kubernetes achieves this cross-node communication.
+
 - On a single node, communication is relatively simple due to the presence of a **virtual bridge** (`docker0`). However, **`docker0` bridges on different nodes are isolated** and do not automatically have connections between them.
 - **Overlay Network: A Solution for Cross-Node Communication**:
 	- An overlay network provides a virtual network that connects containers across multiple nodes. Essentially, it creates a **"public" bridge** using software, which spans across all the nodes in the cluster.
 	- Through this network, containers or pods can communicate as if they were on the same physical or virtual LAN, even if they are located on different nodes.
 	- Basically Overlay Network is a flat network working above host network.
 	- Kubernetes does not provide any default network implementation, rather it only defines the model and leaves to other tools like kube-proxy, Calico, Flannel to implement it
+	- Packet flow from pod A in node1 to podB in node2
+```mermaid
+graph LR
+A[Pod A - Node 1] --> B[veth pair -Node 1]
+B --> C[Bridge cbr0 - Node 1]
+C --> D[Overlay Network]
+D --> E[Bridge cbr0 - Node 2]
+E --> F[veth pair -Node 2]
+F --> G[Pod B - Node 2]
+```
+- Flowchart for the same
+```mermaid
+%% Cross-Node Pod Communication
+flowchart TB
+    subgraph Node1["Node 1"]
+        subgraph P1["Pod 1 (10.244.1.2)"]
+            C1["Container"]
+        end
+        B1["cbr0 Bridge"]
+        F1["flannel0/calico"]
+        P1 --> |veth| B1
+        B1 --> F1
+    end
+    
+    subgraph Node2["Node 2"]
+        subgraph P2["Pod 2 (10.244.2.2)"]
+            C2["Container"]
+        end
+        B2["cbr0 Bridge"]
+        F2["flannel0/calico"]
+        P2 --> |veth| B2
+        B2 --> F2
+    end
+    
+    subgraph Overlay["Overlay Network"]
+        direction LR
+        RT1["Router/Switch"]
+    end
+    
+    F1 --> |"VXLAN/\nIPIP"| RT1
+    F2 --> |"VXLAN/\nIPIP"| RT1
+    
+```
+
 
 >[!note]
 > All plug-ins must follow a couple of important rules. 
@@ -83,14 +198,16 @@ So far, we have discussed how pods communicate within the same host using bridge
 		#### Mode 1: UDP
 		- When Flannel is set up on a Kubernetes node, it runs a daemon named **flanneld**. This daemon creates the TUN device `flannel0`, which acts as the default gateway for the Docker bridge (`docker0`).
 		- Flannel allocates a unique subnet from the Pod CIDR to each node, ensuring that every Pod on that node receives an IP within this subnet.
-		- To view the private network segment allocated to Docker, you can check `/etc/docker/daemon.json` on the node. Flannel can also modify Docker's configuration to attach the allocated network segment by using the `--bip` option.
-		- Suppose we have pod0 on node1 and pod1 on node2 then the packets between then would follow this path:
+		- To view the private network segment allocated to Docker, we can check `/etc/docker/daemon.json` on the node. Flannel can also modify Docker's configuration to attach the allocated network segment by using the `--bip` option.
+		- Suppose we have pod0 on node1 and pod1 on node2 then the Packet flow would be:
 			- **Pod0** → `docker0` → `flannel0` (flanneld packs the packet) → (sender network interface) → (intermediate router) → (receiver network interface) → `flannel0` (flanneld unpacks) → `docker0` → **Pod1**
 		- As we can see **The process is very complicated and long.** And as flanneld runs in userspace there is a performance cost due to context switching and packet handling.
 		#### Mode 2: VxLan
 		- VXLAN, or Virtual Extensible LAN is a network virtualization technology supported by Linux. 
 		- VXLAN can completely implement encapsulation and decapsulation in kernel mode, thereby building an overlay network through the "tunnel" mechanism.
-		- In this mode the VxLan will set up VTEP() in layer 2 network.****
+		- In this mode the VxLan will set up VTEP() in layer 2 network.
+		- To view VXLAN interfaces `ip -d link show type vxlan` and for monitoring we can use tcpdump
+		
 
 
 
@@ -190,7 +307,6 @@ Overlay networks are built using tunneling techniques such as **VXLAN (Virtual E
 #### NetworkPolicy:
 - From k8s doc 
 	- `If you want to control traffic flow at the IP address or port level (OSI layer 3 or 4), NetworkPolicies allow you to specify rules for traffic flow within your cluster, and also between Pods and the outside world. Your cluster must use a network plugin that supports NetworkPolicy enforcement.`
-	
 - A `NetworkPolicy` is a Kubernetes object that enables the creation of policies to **control communication between pods and external entities** within a namespace.
 - The `ingress` section defines **rules for incoming traffic**, while the `egress` section defines **rules for outgoing traffic**.
 - `NetworkPolicy` uses:
@@ -202,6 +318,4 @@ Overlay networks are built using tunneling techniques such as **VXLAN (Virtual E
 
 Notes
 - To get open port use /proc/net/tcp -> here the output is in hexadecimal
-
-
-![[Pasted image 20241023133609.png]]
+![[Pasted image 20241023133609.png]
